@@ -26,7 +26,7 @@ import (
 // Provider Implementation
 // =====================================
 
-// Provider implements gpa.Provider using Bun
+// Provider implements gpa.Provider and gpa.SQLProvider using Bun
 type Provider struct {
 	db     *bun.DB
 	config gpa.Config
@@ -148,6 +148,94 @@ func GetRepository[T any](p *Provider) gpa.Repository[T] {
 	}
 }
 
+// =====================================
+// SQLProvider Implementation
+// =====================================
+
+// DB returns the underlying database/sql.DB instance
+func (p *Provider) DB() interface{} {
+	return p.db.DB
+}
+
+// BeginTx starts a transaction with specific isolation level
+func (p *Provider) BeginTx(ctx context.Context, opts *gpa.TxOptions) (interface{}, error) {
+	if opts == nil {
+		return p.db.BeginTx(ctx, nil)
+	}
+	
+	// Convert GPA isolation level to sql.IsolationLevel
+	sqlOpts := &sql.TxOptions{
+		ReadOnly: opts.ReadOnly,
+	}
+	
+	switch opts.IsolationLevel {
+	case gpa.IsolationReadUncommitted:
+		sqlOpts.Isolation = sql.LevelReadUncommitted
+	case gpa.IsolationReadCommitted:
+		sqlOpts.Isolation = sql.LevelReadCommitted
+	case gpa.IsolationRepeatableRead:
+		sqlOpts.Isolation = sql.LevelRepeatableRead
+	case gpa.IsolationSerializable:
+		sqlOpts.Isolation = sql.LevelSerializable
+	default:
+		sqlOpts.Isolation = sql.LevelDefault
+	}
+	
+	return p.db.BeginTx(ctx, sqlOpts)
+}
+
+// Migrate runs database migrations
+func (p *Provider) Migrate(models ...interface{}) error {
+	// Bun doesn't have built-in migration like GORM
+	// This would need to be implemented with a migration framework
+	return nil
+}
+
+// RawQuery executes raw SQL and returns results
+func (p *Provider) RawQuery(ctx context.Context, query string, args ...interface{}) (interface{}, error) {
+	rows, err := p.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	
+	// Convert rows to map slice
+	columns, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	
+	var results []map[string]interface{}
+	for rows.Next() {
+		values := make([]interface{}, len(columns))
+		valuePtrs := make([]interface{}, len(columns))
+		for i := range values {
+			valuePtrs[i] = &values[i]
+		}
+		
+		if err := rows.Scan(valuePtrs...); err != nil {
+			return nil, err
+		}
+		
+		row := make(map[string]interface{})
+		for i, col := range columns {
+			row[col] = values[i]
+		}
+		results = append(results, row)
+	}
+	
+	return results, rows.Err()
+}
+
+// RawExec executes raw SQL without returning results
+func (p *Provider) RawExec(ctx context.Context, query string, args ...interface{}) (gpa.Result, error) {
+	result, err := p.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	return &Result{result: result}, nil
+}
+
 
 // Repository implements gpa.Repository[T] using Bun
 type Repository[T any] struct {
@@ -157,8 +245,31 @@ type Repository[T any] struct {
 
 // Create inserts a new entity
 func (r *Repository[T]) Create(ctx context.Context, entity *T) error {
+	// Execute before create hook
+	if hook, ok := any(entity).(gpa.BeforeCreateHook); ok {
+		if err := hook.BeforeCreate(ctx); err != nil {
+			return gpa.GPAError{
+				Type:    gpa.ErrorTypeValidation,
+				Message: "before create hook failed",
+				Cause:   err,
+			}
+		}
+	}
+	
 	_, err := r.db.NewInsert().Model(entity).Exec(ctx)
-	return convertBunError(err)
+	if err != nil {
+		return convertBunError(err)
+	}
+	
+	// Execute after create hook
+	if hook, ok := any(entity).(gpa.AfterCreateHook); ok {
+		if err := hook.AfterCreate(ctx); err != nil {
+			// Log error but don't fail the operation
+			// log.Printf("after create hook failed: %v", err)
+		}
+	}
+	
+	return nil
 }
 
 // CreateBatch inserts multiple entities
@@ -166,8 +277,36 @@ func (r *Repository[T]) CreateBatch(ctx context.Context, entities []*T) error {
 	if len(entities) == 0 {
 		return nil
 	}
+	
+	// Execute before create hooks for all entities
+	for _, entity := range entities {
+		if hook, ok := any(entity).(gpa.BeforeCreateHook); ok {
+			if err := hook.BeforeCreate(ctx); err != nil {
+				return gpa.GPAError{
+					Type:    gpa.ErrorTypeValidation,
+					Message: "before create hook failed",
+					Cause:   err,
+				}
+			}
+		}
+	}
+	
 	_, err := r.db.NewInsert().Model(&entities).Exec(ctx)
-	return convertBunError(err)
+	if err != nil {
+		return convertBunError(err)
+	}
+	
+	// Execute after create hooks for all entities
+	for _, entity := range entities {
+		if hook, ok := any(entity).(gpa.AfterCreateHook); ok {
+			if err := hook.AfterCreate(ctx); err != nil {
+				// Log error but don't fail the operation
+				// log.Printf("after create hook failed: %v", err)
+			}
+		}
+	}
+	
+	return nil
 }
 
 // FindByID retrieves a single entity by ID
@@ -177,6 +316,15 @@ func (r *Repository[T]) FindByID(ctx context.Context, id interface{}) (*T, error
 	if err != nil {
 		return nil, convertBunError(err)
 	}
+	
+	// Execute after find hook
+	if hook, ok := any(&entity).(gpa.AfterFindHook); ok {
+		if err := hook.AfterFind(ctx); err != nil {
+			// Log error but don't fail the operation
+			// log.Printf("after find hook failed: %v", err)
+		}
+	}
+	
 	return &entity, nil
 }
 
@@ -193,8 +341,31 @@ func (r *Repository[T]) FindAll(ctx context.Context, opts ...gpa.QueryOption) ([
 
 // Update modifies an existing entity
 func (r *Repository[T]) Update(ctx context.Context, entity *T) error {
+	// Execute before update hook
+	if hook, ok := any(entity).(gpa.BeforeUpdateHook); ok {
+		if err := hook.BeforeUpdate(ctx); err != nil {
+			return gpa.GPAError{
+				Type:    gpa.ErrorTypeValidation,
+				Message: "before update hook failed",
+				Cause:   err,
+			}
+		}
+	}
+	
 	_, err := r.db.NewUpdate().Model(entity).WherePK().Exec(ctx)
-	return convertBunError(err)
+	if err != nil {
+		return convertBunError(err)
+	}
+	
+	// Execute after update hook
+	if hook, ok := any(entity).(gpa.AfterUpdateHook); ok {
+		if err := hook.AfterUpdate(ctx); err != nil {
+			// Log error but don't fail the operation
+			// log.Printf("after update hook failed: %v", err)
+		}
+	}
+	
+	return nil
 }
 
 // UpdatePartial modifies specific fields of an entity
@@ -211,8 +382,38 @@ func (r *Repository[T]) UpdatePartial(ctx context.Context, id interface{}, updat
 // Delete removes an entity by ID
 func (r *Repository[T]) Delete(ctx context.Context, id interface{}) error {
 	var entity T
-	_, err := r.db.NewDelete().Model(&entity).Where("id = ?", id).Exec(ctx)
-	return convertBunError(err)
+	
+	// First, fetch the entity to run hooks on it
+	err := r.db.NewSelect().Model(&entity).Where("id = ?", id).Scan(ctx)
+	if err != nil {
+		return convertBunError(err)
+	}
+	
+	// Execute before delete hook
+	if hook, ok := any(&entity).(gpa.BeforeDeleteHook); ok {
+		if err := hook.BeforeDelete(ctx); err != nil {
+			return gpa.GPAError{
+				Type:    gpa.ErrorTypeValidation,
+				Message: "before delete hook failed",
+				Cause:   err,
+			}
+		}
+	}
+	
+	_, err = r.db.NewDelete().Model(&entity).Where("id = ?", id).Exec(ctx)
+	if err != nil {
+		return convertBunError(err)
+	}
+	
+	// Execute after delete hook
+	if hook, ok := any(&entity).(gpa.AfterDeleteHook); ok {
+		if err := hook.AfterDelete(ctx); err != nil {
+			// Log error but don't fail the operation
+			// log.Printf("after delete hook failed: %v", err)
+		}
+	}
+	
+	return nil
 }
 
 // DeleteByCondition removes entities matching the condition
