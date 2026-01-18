@@ -11,10 +11,10 @@ import (
 	"strings"
 	"time"
 
+	_ "github.com/glebarez/go-sqlite"
 	"github.com/go-sql-driver/mysql"
 	"github.com/lemmego/gpa"
 	_ "github.com/lib/pq"
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect/mysqldialect"
 	"github.com/uptrace/bun/dialect/pgdialect"
@@ -141,7 +141,7 @@ func (p *Provider) ProviderInfo() gpa.ProviderInfo {
 
 // GetRepository returns a type-safe repository for any entity type T
 // This enables the unified provider API: userRepo := gpabun.GetRepository[User](provider)
-func GetRepository[T any](p *Provider) gpa.Repository[T] {
+func GetRepository[T any](p *Provider) gpa.SQLRepository[T] {
 	return &Repository[T]{
 		db:       p.db,
 		provider: p,
@@ -162,12 +162,12 @@ func (p *Provider) BeginTx(ctx context.Context, opts *gpa.TxOptions) (interface{
 	if opts == nil {
 		return p.db.BeginTx(ctx, nil)
 	}
-	
+
 	// Convert GPA isolation level to sql.IsolationLevel
 	sqlOpts := &sql.TxOptions{
 		ReadOnly: opts.ReadOnly,
 	}
-	
+
 	switch opts.IsolationLevel {
 	case gpa.IsolationReadUncommitted:
 		sqlOpts.Isolation = sql.LevelReadUncommitted
@@ -180,7 +180,7 @@ func (p *Provider) BeginTx(ctx context.Context, opts *gpa.TxOptions) (interface{
 	default:
 		sqlOpts.Isolation = sql.LevelDefault
 	}
-	
+
 	return p.db.BeginTx(ctx, sqlOpts)
 }
 
@@ -198,13 +198,13 @@ func (p *Provider) RawQuery(ctx context.Context, query string, args ...interface
 		return nil, err
 	}
 	defer rows.Close()
-	
+
 	// Convert rows to map slice
 	columns, err := rows.Columns()
 	if err != nil {
 		return nil, err
 	}
-	
+
 	var results []map[string]interface{}
 	for rows.Next() {
 		values := make([]interface{}, len(columns))
@@ -212,18 +212,18 @@ func (p *Provider) RawQuery(ctx context.Context, query string, args ...interface
 		for i := range values {
 			valuePtrs[i] = &values[i]
 		}
-		
+
 		if err := rows.Scan(valuePtrs...); err != nil {
 			return nil, err
 		}
-		
+
 		row := make(map[string]interface{})
 		for i, col := range columns {
 			row[col] = values[i]
 		}
 		results = append(results, row)
 	}
-	
+
 	return results, rows.Err()
 }
 
@@ -235,7 +235,6 @@ func (p *Provider) RawExec(ctx context.Context, query string, args ...interface{
 	}
 	return &Result{result: result}, nil
 }
-
 
 // Repository implements gpa.Repository[T] using Bun
 type Repository[T any] struct {
@@ -255,12 +254,12 @@ func (r *Repository[T]) Create(ctx context.Context, entity *T) error {
 			}
 		}
 	}
-	
+
 	_, err := r.db.NewInsert().Model(entity).Exec(ctx)
 	if err != nil {
 		return convertBunError(err)
 	}
-	
+
 	// Execute after create hook
 	if hook, ok := any(entity).(gpa.AfterCreateHook); ok {
 		if err := hook.AfterCreate(ctx); err != nil {
@@ -268,7 +267,7 @@ func (r *Repository[T]) Create(ctx context.Context, entity *T) error {
 			// log.Printf("after create hook failed: %v", err)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -277,7 +276,7 @@ func (r *Repository[T]) CreateBatch(ctx context.Context, entities []*T) error {
 	if len(entities) == 0 {
 		return nil
 	}
-	
+
 	// Execute before create hooks for all entities
 	for _, entity := range entities {
 		if hook, ok := any(entity).(gpa.BeforeCreateHook); ok {
@@ -290,12 +289,12 @@ func (r *Repository[T]) CreateBatch(ctx context.Context, entities []*T) error {
 			}
 		}
 	}
-	
+
 	_, err := r.db.NewInsert().Model(&entities).Exec(ctx)
 	if err != nil {
 		return convertBunError(err)
 	}
-	
+
 	// Execute after create hooks for all entities
 	for _, entity := range entities {
 		if hook, ok := any(entity).(gpa.AfterCreateHook); ok {
@@ -305,7 +304,7 @@ func (r *Repository[T]) CreateBatch(ctx context.Context, entities []*T) error {
 			}
 		}
 	}
-	
+
 	return nil
 }
 
@@ -316,7 +315,7 @@ func (r *Repository[T]) FindByID(ctx context.Context, id interface{}) (*T, error
 	if err != nil {
 		return nil, convertBunError(err)
 	}
-	
+
 	// Execute after find hook
 	if hook, ok := any(&entity).(gpa.AfterFindHook); ok {
 		if err := hook.AfterFind(ctx); err != nil {
@@ -324,7 +323,7 @@ func (r *Repository[T]) FindByID(ctx context.Context, id interface{}) (*T, error
 			// log.Printf("after find hook failed: %v", err)
 		}
 	}
-	
+
 	return &entity, nil
 }
 
@@ -351,12 +350,12 @@ func (r *Repository[T]) Update(ctx context.Context, entity *T) error {
 			}
 		}
 	}
-	
+
 	_, err := r.db.NewUpdate().Model(entity).WherePK().Exec(ctx)
 	if err != nil {
 		return convertBunError(err)
 	}
-	
+
 	// Execute after update hook
 	if hook, ok := any(entity).(gpa.AfterUpdateHook); ok {
 		if err := hook.AfterUpdate(ctx); err != nil {
@@ -364,7 +363,7 @@ func (r *Repository[T]) Update(ctx context.Context, entity *T) error {
 			// log.Printf("after update hook failed: %v", err)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -382,13 +381,13 @@ func (r *Repository[T]) UpdatePartial(ctx context.Context, id interface{}, updat
 // Delete removes an entity by ID
 func (r *Repository[T]) Delete(ctx context.Context, id interface{}) error {
 	var entity T
-	
+
 	// First, fetch the entity to run hooks on it
 	err := r.db.NewSelect().Model(&entity).Where("id = ?", id).Scan(ctx)
 	if err != nil {
 		return convertBunError(err)
 	}
-	
+
 	// Execute before delete hook
 	if hook, ok := any(&entity).(gpa.BeforeDeleteHook); ok {
 		if err := hook.BeforeDelete(ctx); err != nil {
@@ -399,12 +398,12 @@ func (r *Repository[T]) Delete(ctx context.Context, id interface{}) error {
 			}
 		}
 	}
-	
+
 	_, err = r.db.NewDelete().Model(&entity).Where("id = ?", id).Exec(ctx)
 	if err != nil {
 		return convertBunError(err)
 	}
-	
+
 	// Execute after delete hook
 	if hook, ok := any(&entity).(gpa.AfterDeleteHook); ok {
 		if err := hook.AfterDelete(ctx); err != nil {
@@ -412,7 +411,7 @@ func (r *Repository[T]) Delete(ctx context.Context, id interface{}) error {
 			// log.Printf("after delete hook failed: %v", err)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -541,7 +540,6 @@ func (r *Result) RowsAffected() (int64, error) {
 	return r.result.RowsAffected()
 }
 
-
 // =====================================
 // Connection Helpers
 // =====================================
@@ -590,7 +588,7 @@ func createSQLiteConnection(config gpa.Config) (*sql.DB, error) {
 			}
 		}
 	}
-	
+
 	return sql.Open("sqlite3", config.Database)
 }
 
