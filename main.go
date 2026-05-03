@@ -148,6 +148,19 @@ func GetRepository[T any](p *Provider) gpa.SQLRepository[T] {
 	}
 }
 
+// GetRepositoryFromRegistry returns a type-safe repository using the GPA registry.
+// If no instanceName is provided, uses the default instance.
+//
+//	userRepo := gpabun.GetRepositoryFromRegistry[User]()           // default
+//	userRepo := gpabun.GetRepositoryFromRegistry[User]("primary")  // named
+func GetRepositoryFromRegistry[T any](instanceName ...string) gpa.SQLRepository[T] {
+	provider := gpa.MustGet[*Provider](instanceName...)
+	return &Repository[T]{
+		db:       provider.db,
+		provider: provider,
+	}
+}
+
 // =====================================
 // SQLProvider Implementation
 // =====================================
@@ -493,6 +506,82 @@ func (r *Repository[T]) GetEntityInfo() (*gpa.EntityInfo, error) {
 		TableName: entityType.Name(),
 		Fields:    []gpa.FieldInfo{},
 	}, nil
+}
+
+// FindBySQL executes a raw SQL SELECT query and returns typed results
+func (r *Repository[T]) FindBySQL(ctx context.Context, sql string, args []interface{}) ([]*T, error) {
+	var entities []*T
+	err := r.db.NewRaw(sql, args...).Scan(ctx, &entities)
+	return entities, convertBunError(err)
+}
+
+// ExecSQL executes a raw SQL command that doesn't return entities
+func (r *Repository[T]) ExecSQL(ctx context.Context, sql string, args ...interface{}) (gpa.Result, error) {
+	result, err := r.db.NewRaw(sql, args...).Exec(ctx)
+	if err != nil {
+		return nil, convertBunError(err)
+	}
+	return &Result{result: result}, nil
+}
+
+// FindWithRelations retrieves entities with their related entities preloaded
+func (r *Repository[T]) FindWithRelations(ctx context.Context, relations []string, opts ...gpa.QueryOption) ([]*T, error) {
+	var entities []*T
+	query := r.db.NewSelect().Model(&entities)
+	for _, rel := range relations {
+		query = query.Relation(rel)
+	}
+	err := query.Scan(ctx)
+	return entities, convertBunError(err)
+}
+
+// FindByIDWithRelations retrieves a single entity by ID with relations preloaded
+func (r *Repository[T]) FindByIDWithRelations(ctx context.Context, id interface{}, relations []string) (*T, error) {
+	var entity T
+	query := r.db.NewSelect().Model(&entity).Where("id = ?", id)
+	for _, rel := range relations {
+		query = query.Relation(rel)
+	}
+	err := query.Scan(ctx)
+	if err != nil {
+		return nil, convertBunError(err)
+	}
+	return &entity, nil
+}
+
+// CreateTable creates a new table based on the entity structure
+func (r *Repository[T]) CreateTable(ctx context.Context) error {
+	var entity T
+	_, err := r.db.NewCreateTable().Model(&entity).Exec(ctx)
+	return convertBunError(err)
+}
+
+// DropTable removes the table for entity type T
+func (r *Repository[T]) DropTable(ctx context.Context) error {
+	var entity T
+	_, err := r.db.NewDropTable().Model(&entity).Exec(ctx)
+	return convertBunError(err)
+}
+
+// CreateIndex creates a database index on the specified fields
+func (r *Repository[T]) CreateIndex(ctx context.Context, fields []string, unique bool) error {
+	var entity T
+	query := r.db.NewCreateIndex().Model(&entity)
+	if unique {
+		query = query.Unique()
+	}
+	for _, field := range fields {
+		query = query.Column(field)
+	}
+	_, err := query.Exec(ctx)
+	return convertBunError(err)
+}
+
+// DropIndex removes a database index
+func (r *Repository[T]) DropIndex(ctx context.Context, indexName string) error {
+	var entity T
+	_, err := r.db.NewDropIndex().Model(&entity).Index(indexName).Exec(ctx)
+	return convertBunError(err)
 }
 
 // Close closes the repository
