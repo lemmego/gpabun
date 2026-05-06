@@ -139,21 +139,21 @@ func (p *Provider) ProviderInfo() gpa.ProviderInfo {
 	}
 }
 
-// GetRepository returns a type-safe repository for any entity type T
-// This enables the unified provider API: userRepo := gpabun.GetRepository[User](provider)
-func GetRepository[T any](p *Provider) gpa.SQLRepository[T] {
+// NewRepository returns a type-safe repository for any entity type T
+// This enables the unified provider API: userRepo := gpabun.NewRepository[User](provider)
+func NewRepository[T any](p *Provider) gpa.SQLRepository[T] {
 	return &Repository[T]{
 		db:       p.db,
 		provider: p,
 	}
 }
 
-// GetRepositoryFromRegistry returns a type-safe repository using the GPA registry.
+// GetRepository returns a type-safe repository using the GPA registry.
 // If no instanceName is provided, uses the default instance.
 //
-//	userRepo := gpabun.GetRepositoryFromRegistry[User]()           // default
-//	userRepo := gpabun.GetRepositoryFromRegistry[User]("primary")  // named
-func GetRepositoryFromRegistry[T any](instanceName ...string) gpa.SQLRepository[T] {
+//	userRepo := gpabun.GetRepository[User]()           // default
+//	userRepo := gpabun.GetRepository[User]("primary")  // named
+func GetRepository[T any](instanceName ...string) gpa.SQLRepository[T] {
 	provider := gpa.MustGet[*Provider](instanceName...)
 	return &Repository[T]{
 		db:       provider.db,

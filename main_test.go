@@ -135,7 +135,7 @@ func TestUnifiedProviderAPI(t *testing.T) {
 	}
 
 	// Test getting repository using unified API
-	repo := GetRepository[User](provider)
+	repo := NewRepository[User](provider)
 	if repo == nil {
 		t.Fatal("Expected repository to be created")
 	}
