@@ -32,6 +32,11 @@ type Provider struct {
 	config gpa.Config
 }
 
+// Repository creates a type-safe repository from this provider instance.
+func (p *Provider) Repository[T any]() gpa.SQLRepository[T] {
+	return NewRepository[T](p)
+}
+
 // NewProvider creates a new Bun provider instance
 func NewProvider(config gpa.Config) (*Provider, error) {
 	provider := &Provider{config: config}
@@ -148,17 +153,52 @@ func NewRepository[T any](p *Provider) gpa.SQLRepository[T] {
 	}
 }
 
-// GetRepository returns a type-safe repository using the GPA registry.
-// If no instanceName is provided, uses the default instance.
+// GetRepository returns a type-safe repository for a provider instance.
+// It also accepts a registry instance name, or no argument for the default
+// registered provider.
 //
-//	userRepo := gpabun.GetRepository[User]()           // default
-//	userRepo := gpabun.GetRepository[User]("primary")  // named
-func GetRepository[T any](instanceName ...string) gpa.SQLRepository[T] {
-	provider := gpa.MustGet[*Provider](instanceName...)
+//	userRepo := gpabun.GetRepository[User](provider)   // explicit provider
+//	userRepo := gpabun.GetRepository[User]()            // default
+//	userRepo := gpabun.GetRepository[User]("primary")   // named
+func GetRepository[T any](source ...interface{}) gpa.SQLRepository[T] {
+	provider := repositoryProvider(source...)
 	return &Repository[T]{
 		db:       provider.db,
 		provider: provider,
 	}
+}
+
+// GetRepositoryByName returns a repository for a named registry instance.
+func GetRepositoryByName[T any](instanceName ...string) gpa.SQLRepository[T] {
+	if len(instanceName) == 0 {
+		return GetRepository[T]()
+	}
+	return GetRepository[T](instanceNameToSource(instanceName...))
+}
+
+func repositoryProvider(source ...interface{}) *Provider {
+	if len(source) == 0 {
+		return gpa.MustGet[*Provider]()
+	}
+	if len(source) != 1 {
+		panic("gpabun: expected a provider, one instance name, or no argument")
+	}
+
+	switch value := source[0].(type) {
+	case *Provider:
+		return value
+	case string:
+		return gpa.MustGet[*Provider](value)
+	default:
+		panic("gpabun: expected a *Provider or registry instance name")
+	}
+}
+
+func instanceNameToSource(instanceName ...string) interface{} {
+	if len(instanceName) == 1 {
+		return instanceName[0]
+	}
+	panic("gpabun: expected at most one registry instance name")
 }
 
 // =====================================
@@ -344,6 +384,7 @@ func (r *Repository[T]) FindByID(ctx context.Context, id interface{}) (*T, error
 func (r *Repository[T]) FindAll(ctx context.Context, opts ...gpa.QueryOption) ([]*T, error) {
 	var entities []*T
 	query := r.db.NewSelect().Model(&entities)
+	query = applyQueryOptions(query, opts...)
 	err := query.Scan(ctx)
 	if err != nil {
 		return nil, convertBunError(err)
@@ -364,9 +405,16 @@ func (r *Repository[T]) Update(ctx context.Context, entity *T) error {
 		}
 	}
 
-	_, err := r.db.NewUpdate().Model(entity).WherePK().Exec(ctx)
+	result, err := r.db.NewUpdate().Model(entity).WherePK().Exec(ctx)
 	if err != nil {
 		return convertBunError(err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return convertBunError(err)
+	}
+	if rows == 0 {
+		return gpa.NewError(gpa.ErrorTypeNotFound, "entity not found")
 	}
 
 	// Execute after update hook
@@ -387,8 +435,18 @@ func (r *Repository[T]) UpdatePartial(ctx context.Context, id interface{}, updat
 	for field, value := range updates {
 		query = query.Set("? = ?", bun.Ident(field), value)
 	}
-	_, err := query.Exec(ctx)
-	return convertBunError(err)
+	result, err := query.Exec(ctx)
+	if err != nil {
+		return convertBunError(err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return convertBunError(err)
+	}
+	if rows == 0 {
+		return gpa.NewError(gpa.ErrorTypeNotFound, "entity not found")
+	}
+	return nil
 }
 
 // Delete removes an entity by ID
@@ -435,6 +493,27 @@ func (r *Repository[T]) DeleteByCondition(ctx context.Context, condition gpa.Con
 	return convertBunError(err)
 }
 
+func applyQueryOptions(query *bun.SelectQuery, opts ...gpa.QueryOption) *bun.SelectQuery {
+	parsed := &gpa.Query{}
+	for _, opt := range opts {
+		opt.Apply(parsed)
+	}
+
+	for _, condition := range parsed.Conditions {
+		query = query.Where(condition.String(), condition.Value())
+	}
+	for _, order := range parsed.Orders {
+		query = query.OrderExpr(order.Field + " " + string(order.Direction))
+	}
+	if parsed.Limit != nil {
+		query = query.Limit(*parsed.Limit)
+	}
+	if parsed.Offset != nil {
+		query = query.Offset(*parsed.Offset)
+	}
+	return query
+}
+
 // Query retrieves entities based on query options
 func (r *Repository[T]) Query(ctx context.Context, opts ...gpa.QueryOption) ([]*T, error) {
 	return r.FindAll(ctx, opts...)
@@ -458,7 +537,9 @@ func (r *Repository[T]) QueryOne(ctx context.Context, opts ...gpa.QueryOption) (
 // Count returns the number of entities matching the query options
 func (r *Repository[T]) Count(ctx context.Context, opts ...gpa.QueryOption) (int64, error) {
 	var entity T
-	count, err := r.db.NewSelect().Model(&entity).Count(ctx)
+	query := r.db.NewSelect().Model(&entity)
+	query = applyQueryOptions(query, opts...)
+	count, err := query.Count(ctx)
 	return int64(count), convertBunError(err)
 }
 
@@ -678,7 +759,7 @@ func createSQLiteConnection(config gpa.Config) (*sql.DB, error) {
 		}
 	}
 
-	return sql.Open("sqlite3", config.Database)
+	return sql.Open("sqlite", config.Database)
 }
 
 // =====================================
